@@ -10,7 +10,13 @@ dependencies = [
     "httpx>=0.28",
     "starlette>=0.47",
     "uvicorn>=0.34",
+    "sse-starlette>=2.1",
 ]
+
+[project.scripts]
+durable-mcp = "durable_mcp.main:main"
+durable-mcp-worker = "durable_mcp.worker:main"
+durable-mcp-dev-service = "durable_mcp.dev_service:main"
 
 [project.optional-dependencies]
 dev = [

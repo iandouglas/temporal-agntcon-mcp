@@ -179,16 +179,25 @@ def build_admin_routes(
 
         return EventSourceResponse(events(), ping=15)
 
-    async def healthz(_: Request) -> JSONResponse:
-        return JSONResponse({"ok": True, "tools": [s.tool_name for s in config.services]})
-
     return [
         Route("/admin/control", control, methods=["POST"]),
         Route("/admin/state", state, methods=["GET"]),
         Route("/admin/reset", reset, methods=["POST"]),
         Route("/admin/live", live, methods=["GET"]),
-        Route("/healthz", healthz, methods=["GET"]),
     ]
+
+
+def build_health_route(config: Config) -> Route:
+    """Unauthenticated health check, mounted on both listeners for Railway.
+
+    Reports only tool names - never availability state, which would leak the
+    toggle positions to any public caller.
+    """
+
+    async def healthz(_: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "tools": [s.tool_name for s in config.services]})
+
+    return Route("/healthz", healthz, methods=["GET"])
 
 
 __all__ = [
@@ -197,6 +206,7 @@ __all__ = [
     "apply_control",
     "bearer_token",
     "build_admin_routes",
+    "build_health_route",
     "in_flight",
     "read_state",
 ]
