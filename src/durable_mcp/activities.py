@@ -24,9 +24,14 @@ _NON_RETRYABLE_STATUSES = frozenset(range(400, 500)) - {408, 429}
 class ServiceActivities:
     """Activity implementations, bound to a shared HTTP client and flag store."""
 
-    def __init__(self, store: AvailabilityStore, http_timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        store: AvailabilityStore,
+        http_timeout_seconds: float,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
         self._store = store
-        self._client = httpx.AsyncClient(
+        self._client = client or httpx.AsyncClient(
             # Must stay under the activity's start_to_close_timeout, so the
             # HTTP layer gives up first and Temporal records a clean failure
             # rather than having the attempt killed out from under it.

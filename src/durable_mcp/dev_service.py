@@ -11,6 +11,7 @@ Not deployed to Railway.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Awaitable, Callable
 
 import uvicorn
 from starlette.applications import Starlette
@@ -22,12 +23,16 @@ _paused: set[str] = set()
 
 
 def build_app(keys: list[str]) -> Starlette:
-    async def handle(request: Request) -> Response:
-        key = request.path_params["key"]
-        if key in _paused:
-            # Exactly the stated failure contract: 500, empty body.
-            return Response(status_code=500)
-        return JSONResponse({key: True})
+    def make_handler(key: str) -> Callable[[Request], Awaitable[Response]]:
+        # One handler per configured key, so an unconfigured path 404s. That is
+        # what lets the tests prove a typo'd URL fails fast instead of retrying.
+        async def handle(_: Request) -> Response:
+            if key in _paused:
+                # Exactly the stated failure contract: 500, empty body.
+                return Response(status_code=500)
+            return JSONResponse({key: True})
+
+        return handle
 
     async def pause(request: Request) -> JSONResponse:
         key = request.path_params["key"]
@@ -40,7 +45,7 @@ def build_app(keys: list[str]) -> Starlette:
 
     return Starlette(
         routes=[
-            *[Route(f"/{key}", handle, methods=["POST"]) for key in keys],
+            *[Route(f"/{key}", make_handler(key), methods=["POST"]) for key in keys],
             Route("/_chaos/{key}", pause, methods=["POST"]),
         ]
     )
