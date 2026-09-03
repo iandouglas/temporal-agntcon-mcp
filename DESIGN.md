@@ -23,7 +23,7 @@ completed.
 | 5 | Chaos on the services | Out of scope for this server; a separate audience-facing mechanism toggles them |
 | 6 | Per-tool fake availability | Togglable flag, absorbed as a **retryable failure** (Temporal retries until flipped back) |
 | 7 | Toggle store | **Redis** on Railway, fail-open if unreachable |
-| 8 | Toggle transport | Plain HTTP admin endpoints, **not** an MCP tool (keeps it out of the LLM's reach) |
+| 8 | Toggle transport | Plain HTTP admin endpoints on a **private-only port**, **not** an MCP tool |
 | 9 | Deployment | **Two Railway services from this one repo**: `mcp` (public domain) + `worker` (no domain) |
 | 10 | Temporal backend | Temporal Cloud |
 | 11 | Downstream reachability | Railway **private network** (`*.railway.internal`, `http://`), nothing external |
@@ -32,6 +32,7 @@ completed.
 | 14 | Auth | Two static bearer tokens: `MCP_AUTH_TOKEN` (MCP), `ADMIN_TOKEN` (`/admin/*`) |
 | 15 | Downstream contract | `500` + empty body → retry. `200` + `{"<name>": true}` → done. Nothing else occurs |
 | 16 | Retry visibility | **Server-side SSE dashboard** at `GET /admin/live`, projected on a second screen |
+| 17 | Toggle granularity | **Master switch AND four per-tool switches**; `effective = global AND per_tool` |
 
 ## The stage visual
 
@@ -59,6 +60,43 @@ severs it at 5:00 — and `2026-07-28` has no resumability to recover from that.
 - Ceiling stays the 15-minute hard cap. Workflow wait is capped at ~14 minutes; on
   expiry return an error naming the workflow ID and **leave the workflow running** — it
   is still durable, and pointing at the Temporal UI is on-message.
+
+## The audience control panel
+
+The panel is a separate app (already required to be on Railway, since it toggles the 4
+services over private networking). It drives the MCP server through admin endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /admin/state` | Current flags + resolved tool table, so the panel renders buttons without hardcoding names |
+| `POST /admin/state` | `{"enabled": false}` — the master switch |
+| `POST /admin/services/{name}/state` | `{"enabled": false}` — per-tool; idempotent, safe to mash |
+| `POST /admin/reset` | Everything back to available, between rehearsals |
+| `GET /admin/live` | SSE: in-flight attempt counts **and** toggle-state changes, so every phone stays in sync |
+
+A tool is callable only when `global AND per_tool` are both enabled. When either is off the
+activity raises a retryable error, so behaviour is identical to a dead service: retry every
+250ms until someone flips it back. `tools/list` keeps listing everything regardless — a
+vanishing tool reads as a bug, not a failure.
+
+Concurrency is last-write-wins in Redis. If the panel is open on 300 phones, gating who may
+press what is the panel's problem, not this server's.
+
+## Two ports, one service
+
+Railway maps one domain to one internal port via target ports ("magic ports"), and a service
+listening on several ports simply gets no domain for the ones you don't map. So:
+
+- **`8080`** — public domain, serves `/mcp` only. Bearer `MCP_AUTH_TOKEN`.
+- **`8081`** — **no domain**, serves `/admin/*` only. Reachable exclusively at
+  `mcp.railway.internal:8081`. Bearer `ADMIN_TOKEN` as defense-in-depth.
+
+The admin surface has no route from the internet, so an attendee who reads the MCP URL off
+the projector cannot reach the chaos levers at all.
+
+Toggles are deliberately **not** MCP tools. If `set_taco_availability` appeared in
+`tools/list`, the agent's LLM could see it — and an agent that just got a failure has every
+incentive to "fix" it mid-narration.
 
 ## Temporal configuration
 
