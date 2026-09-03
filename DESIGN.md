@@ -234,3 +234,66 @@ outage for fourteen minutes.
 - Dockerfile (or nixpacks config), `.env.example`
 - README with exact Railway setup steps, including the **disable Serverless** checklist
 - A dev stub service and tests, so this repo is exercisable without `../service`
+
+---
+
+## Implementation notes: what the SDK changed about the plan
+
+Four things found while building, each of which altered a decision above.
+
+### The keepalive is built in (better than planned)
+
+The plan was to hand-roll bare SSE comment lines. Unnecessary: the
+`2026-07-28` transport (`mcp/server/_streamable_http_modern.py`) defers
+committing `text/event-stream` until the handler emits or `_SSE_PING_INTERVAL`
+(15s) elapses, then emits `: ping\r\n\r\n` comments until the handler finishes.
+
+A blocking tool call therefore gets a real transport-level keepalive every 15s
+for free, well inside Railway's 5-minute idle window, with no MCP-level
+messages and nothing depending on agent behaviour. Two requirements follow:
+
+- `json_response` must stay **off**. JSON mode buffers and transfers no bytes
+  during an outage.
+- The **modern** transport must actually be in use — see next.
+
+### The client selects the protocol era, not the server
+
+`StreamableHTTPSessionManager._handle_request` routes on the
+`MCP-Protocol-Version` header: a value outside the known handshake revisions
+goes to the modern handler, anything else (**including an absent header**) falls
+back to the legacy session-based path.
+
+There is no server-side switch. So an agent that omits the header gets sessions,
+no keepalive, and a blocking call severed at ~5 minutes with no resumability.
+This is silent at low latency and fatal exactly when the audience starts
+breaking things.
+
+Mitigations shipped: `stateless_http=True` so legacy callers at least need no
+session ID, and `ProtocolVersionWarningMiddleware`, which logs once per observed
+legacy revision naming the exact consequence and fix.
+
+### The SDK is stable, not beta
+
+`mcp` 2.1.1 is a stable release on PyPI, not the beta the release notes
+described. The "budget a re-rehearsal if you bump it" caveat is downgraded, but
+the lockfile is committed and Docker installs are `--frozen` regardless.
+
+### `CacheHint` already defaults to private
+
+`CacheHint.scope` defaults to `"private"`. It is still set explicitly for
+`tools/list`, because the whole safety of role-filtered lists rests on it and a
+future default change must not silently expose the admin tool list.
+
+## Bugs the tooling caught during the build
+
+Recorded because each was a real defect, not a style nit:
+
+1. `services_by_tool` was computed but never passed to `Config`, so
+   `service_for()` would have returned `None` for every tool. Caught by ruff
+   (`F841`).
+2. `dev_service.build_app` registered static routes but read
+   `request.path_params["key"]`, which does not exist on a static route. Caught
+   by the activity tests.
+3. `build_server` called `server.list_tools()` synchronously, but it is a
+   coroutine — a `TypeError` at boot, on every start. Caught by an HTTP probe
+   before any test existed for it.
