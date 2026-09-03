@@ -162,6 +162,7 @@ def build_server(config: Config, get_client: ClientProvider, store: Availability
         except ControlError as exc:
             raise ToolError(str(exc)) from exc
 
+    admin_registered = {"admin_get_availability", "admin_set_availability"}
     server.add_tool(
         admin_get_availability,
         name="admin_get_availability",
@@ -178,16 +179,18 @@ def build_server(config: Config, get_client: ClientProvider, store: Availability
         ),
     )
 
-    registered = {tool.name for tool in server.list_tools()}
-    missing = ADMIN_TOOL_NAMES - registered
-    if missing:
-        # The filter hides tools by name. If a name drifts, the filter silently
-        # stops hiding it - so assert the two lists agree at boot.
-        raise RuntimeError(f"admin tool names out of sync with the role filter: {missing}")
+    # The role filter hides admin tools *by name*. If a name here drifts from
+    # ADMIN_TOOL_NAMES the filter silently stops hiding it and the admin surface
+    # leaks to every agent, so the two lists must agree at boot.
+    if admin_registered != set(ADMIN_TOOL_NAMES):
+        raise RuntimeError(
+            "admin tool names out of sync with the role filter: "
+            f"registered={sorted(admin_registered)} filtered={sorted(ADMIN_TOOL_NAMES)}"
+        )
 
     logger.info(
         "MCP server exposing %d service tool(s) + %d admin tool(s)",
         len(config.services),
-        len(ADMIN_TOOL_NAMES),
+        len(admin_registered),
     )
     return server

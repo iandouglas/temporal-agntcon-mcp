@@ -118,7 +118,11 @@ def _ctx(method: str, token: str | None, port: int, params: dict[str, Any] | Non
 
 
 ALL_TOOLS = _ListResult(
-    tools=[_Tool(name="order_taco"), _Tool(name="admin_get_availability"), _Tool(name="admin_set_availability")]
+    tools=[
+        _Tool(name="order_taco"),
+        _Tool(name="admin_get_availability"),
+        _Tool(name="admin_set_availability"),
+    ]
 )
 
 
@@ -167,7 +171,7 @@ async def test_dict_shaped_list_result_is_also_filtered() -> None:
 
 
 async def test_agent_calling_admin_tool_gets_unknown_tool_not_forbidden() -> None:
-    """"Forbidden" would confirm the tool exists. It must read as nonexistent."""
+    """ "Forbidden" would confirm the tool exists. It must read as nonexistent."""
     middleware = RoleFilterMiddleware(_config())
     called = False
 

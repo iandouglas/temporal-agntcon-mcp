@@ -20,13 +20,15 @@ import logging
 import signal
 
 import uvicorn
+from starlette.types import ASGIApp
 from temporalio.client import Client
 
 from durable_mcp.admin import build_admin_routes, build_health_route
 from durable_mcp.config import Config, load_config
-from durable_mcp.mcp_app import build_server
+from durable_mcp.mcp_app import ClientProvider, build_server
+from durable_mcp.protocol import ProtocolVersionWarningMiddleware
 from durable_mcp.roles import HTTPAuthMiddleware
-from durable_mcp.state import build_store
+from durable_mcp.state import AvailabilityStore, build_store
 from durable_mcp.temporal import connect
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,46 @@ def _log_boot(config: Config) -> None:
         )
 
 
+def build_apps(
+    config: Config,
+    store: AvailabilityStore,
+    get_client: ClientProvider,
+) -> tuple[ASGIApp, ASGIApp]:
+    """Assemble the (public, internal) ASGI apps.
+
+    Extracted so tests exercise the real wiring - the isolation guarantee is
+    that admin routes are absent from the public app, and asserting that
+    against a re-implementation of the assembly would prove nothing.
+    """
+    server = build_server(config, get_client, store)
+
+    # Each call builds its own session manager and lifespan, so the two
+    # listeners are fully independent. `json_response` stays off: SSE mode is
+    # what gives a blocking call the transport's `: ping` keepalive, without
+    # which Railway closes an idle request after five minutes.
+    # `stateless_http` matters only for the legacy path, where it removes the
+    # session-ID requirement so an older agent still works. The modern path is
+    # stateless by definition - `2026-07-28` removed protocol-level sessions.
+    public_app = server.streamable_http_app(
+        streamable_http_path="/mcp", host=config.bind_host, stateless_http=True
+    )
+    internal_app = server.streamable_http_app(
+        streamable_http_path="/mcp", host=config.bind_host, stateless_http=True
+    )
+
+    # Admin routes exist only on the internal app, so there is no route to them
+    # from the public domain even before any token is checked.
+    for route in reversed(build_admin_routes(config, store, get_client)):
+        internal_app.router.routes.insert(0, route)
+    for app in (public_app, internal_app):
+        app.router.routes.insert(0, build_health_route(config))
+
+    return (
+        HTTPAuthMiddleware(ProtocolVersionWarningMiddleware(public_app), config),
+        HTTPAuthMiddleware(ProtocolVersionWarningMiddleware(internal_app), config),
+    )
+
+
 async def run() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -67,26 +109,12 @@ async def run() -> None:
         return client
 
     client = await connect(config)
-    server = build_server(config, get_client, store)
-
-    # Each call builds its own session manager and lifespan, so the two
-    # listeners are fully independent. `json_response` stays off: SSE mode is
-    # what gives a blocking call the transport's `: ping` keepalive, without
-    # which Railway closes an idle request after five minutes.
-    public_app = server.streamable_http_app(streamable_http_path="/mcp", host=config.bind_host)
-    internal_app = server.streamable_http_app(streamable_http_path="/mcp", host=config.bind_host)
-
-    # Admin routes exist only on the internal app, so there is no route to them
-    # from the public domain even before any token is checked.
-    for route in reversed(build_admin_routes(config, store, get_client)):
-        internal_app.router.routes.insert(0, route)
-    for app in (public_app, internal_app):
-        app.router.routes.insert(0, build_health_route(config))
+    public_app, internal_app = build_apps(config, store, get_client)
 
     servers = [
         _ManagedServer(
             uvicorn.Config(
-                HTTPAuthMiddleware(app, config),
+                app,
                 host=config.bind_host,
                 port=port,
                 log_level="info",
