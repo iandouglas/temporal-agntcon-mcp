@@ -18,7 +18,7 @@ completed.
 |---|---|---|
 | 1 | Purpose | Conference demo; we control the agent (client) side too |
 | 2 | MCP spec revision | `2026-07-28` (latest) |
-| 3 | `tools/call` shape | **Blocking**, with `notifications/progress` streamed while Temporal retries |
+| 3 | `tools/call` shape | **Blocking**. No `notifications/progress`; SSE comment heartbeats keep Railway's proxy fed |
 | 4 | Tool input schema | **Zero-argument** — POST the configured URL as-is, empty body |
 | 5 | Chaos on the services | Out of scope for this server; a separate audience-facing mechanism toggles them |
 | 6 | Per-tool fake availability | Togglable flag, absorbed as a **retryable failure** (Temporal retries until flipped back) |
@@ -28,6 +28,37 @@ completed.
 | 10 | Temporal backend | Temporal Cloud |
 | 11 | Downstream reachability | Railway **private network** (`*.railway.internal`, `http://`), nothing external |
 | 12 | MCP endpoint reachability | **Public** — the agent calls it from outside Railway |
+| 13 | Language | **Python** — MCP Python SDK v2 + Temporal Python SDK |
+| 14 | Auth | Two static bearer tokens: `MCP_AUTH_TOKEN` (MCP), `ADMIN_TOKEN` (`/admin/*`) |
+| 15 | Downstream contract | `500` + empty body → retry. `200` + `{"<name>": true}` → done. Nothing else occurs |
+| 16 | Retry visibility | **Server-side SSE dashboard** at `GET /admin/live`, projected on a second screen |
+
+## The stage visual
+
+The audience watches `GET /admin/live` — an SSE stream of every in-flight workflow with
+its live attempt count and last error, read from `DescribeWorkflowExecution`
+(`pendingActivities[].attempt`). Projected on a second screen.
+
+This is deliberately **independent of the agent**. `notifications/progress` would only be
+visible if the agent chose to render them, and the agent is a separate workstream; the
+failure mode where Temporal retries 400 times, the order succeeds, and the audience sees
+nothing but a spinner is the worst outcome available to this talk. The dashboard removes
+that risk entirely.
+
+## Keeping the connection alive
+
+`tools/call` blocks, so the response must keep transferring bytes or Railway's edge proxy
+severs it at 5:00 — and `2026-07-28` has no resumability to recover from that.
+
+- Response is `text/event-stream`.
+- A bare SSE **comment** line (`: keepalive`) every 30s. Comments are not MCP protocol
+  messages, so no client parses them and nothing depends on agent behaviour, but they are
+  bytes on the wire and Railway's 5-minute idle timer resets.
+- Fallback if the SDK makes raw comment injection awkward: emit `notifications/progress`
+  purely as a heartbeat. Any agent ignores it harmlessly.
+- Ceiling stays the 15-minute hard cap. Workflow wait is capped at ~14 minutes; on
+  expiry return an error naming the workflow ID and **leave the workflow running** — it
+  is still durable, and pointing at the Temporal UI is on-message.
 
 ## Temporal configuration
 
@@ -75,6 +106,19 @@ Per service N in 1..4:
     service_N_name         MCP tool name
     service_N_description  MCP tool description
 
+## Classification rules
+
+| Downstream outcome | Treated as |
+|---|---|
+| `200` + truthy JSON body | Success — body passed through as the tool result |
+| `500`, other `5xx`, empty body | Retryable |
+| Timeout / connection refused / DNS failure | Retryable |
+| `4xx` (`400/401/403/404/405`) | **Non-retryable**, fails fast naming the URL |
+
+The `4xx` row cannot happen under the stated service contract. It exists purely so a
+typo'd `service_N_url` surfaces in one second instead of looking identical to a genuine
+outage for fourteen minutes.
+
 ## Notes / smaller decisions
 
 - Idempotency: honor an optional key from request `_meta` if present, otherwise mint a
@@ -83,10 +127,27 @@ Per service N in 1..4:
 - Progress data comes from `DescribeWorkflowExecution` — `pendingActivities[].attempt`
   gives the live retry count to put on screen.
 
-## Open questions
+### Asserted without asking
 
-- Implementation language / MCP SDK
-- Auth on the public MCP endpoint and on the admin toggle endpoints
-- Response-body validation: is HTTP 200 enough, or must the payload be truthy?
-- Tool-name sanitization from `service_N_name`
-- Fixed 4 services vs. scanning `service_N_*` until a gap
+- **Service discovery:** scan `service_1_*` upward until a gap rather than hardcoding 4.
+  Validate at boot, log the resolved tool table, refuse to boot on a partial service
+  definition or a tool-name collision.
+- **Tool names:** sanitized from `service_N_name` (lowercased, spaces to underscores,
+  invalid characters stripped) to satisfy the MCP tool-name constraints.
+- **Workflow shape:** one `ServiceCallWorkflow` parameterized by service key. Workflow ID
+  `{tool_name}-{uuid}`. Single task queue.
+- **Tool result:** text content carrying the raw body, plus `structuredContent`.
+- **Admin surface:** `POST /admin/services/{name}/state`, `GET /admin/state`,
+  `POST /admin/reset` (all available, for between rehearsals), `GET /admin/live` (SSE).
+  Same service as MCP, gated by `ADMIN_TOKEN`.
+- **Boot safety:** refuse to start if either token is unset.
+- **Redis:** fail-open. A Redis blip must never wedge the demo.
+- **No Railway-specific code.** Pure 12-factor, so the identical image runs against
+  `temporal server start-dev` and local services as a conference-wifi fallback.
+
+## Deliverables
+
+- `railway.json` / service definitions for `mcp` + `worker`
+- Dockerfile (or nixpacks config), `.env.example`
+- README with exact Railway setup steps, including the **disable Serverless** checklist
+- A dev stub service and tests, so this repo is exercisable without `../service`
