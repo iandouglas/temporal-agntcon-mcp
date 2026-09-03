@@ -221,7 +221,7 @@ server, which is also the fallback if conference wifi fails.
 ## Tests
 
 ```bash
-uv run pytest        # 54 tests
+uv run pytest        # 58 tests
 uv run ruff check .
 ```
 
@@ -232,8 +232,13 @@ uv run ruff check .
 - `test_e2e.py` — real Temporal dev server + worker: a dead service does not
   fail the call, a switched-off tool behaves identically, a typo'd URL fails
   fast, and a re-issued call joins the existing order instead of double-ordering
+- `test_full_stack.py` — the whole path, `tools/call` over HTTP through Temporal
+  to a real service: the demo beat (kill `/taco`, the call stays open, Temporal
+  retries, the call succeeds), and a verified SSE upgrade emitting `: ping`
+  keepalives, which is the behaviour Railway's proxy limit depends on
 
-`test_e2e.py` skips automatically when the `temporal` CLI is absent.
+`test_e2e.py` and `test_full_stack.py` skip automatically when the `temporal`
+CLI is absent.
 
 ## Known limits
 

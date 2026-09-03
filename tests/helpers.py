@@ -63,4 +63,8 @@ def make_config(**overrides: Any) -> Config:
         "services_by_tool": {"order_taco": taco, "order_coffee": coffee},
     }
     base.update(overrides)
+    # Derive the lookup from whatever services the caller passed, so a test that
+    # overrides `services` cannot silently end up with a stale index.
+    if "services_by_tool" not in overrides:
+        base["services_by_tool"] = {s.tool_name: s for s in base["services"]}
     return Config(**base)
