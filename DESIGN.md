@@ -33,6 +33,7 @@ completed.
 | 15 | Downstream contract | `500` + empty body → retry. `200` + `{"<name>": true}` → done. Nothing else occurs |
 | 16 | Retry visibility | **Server-side SSE dashboard** at `GET /admin/live`, projected on a second screen |
 | 17 | Toggle granularity | **Master switch AND four per-tool switches**; `effective = global AND per_tool` |
+| 18 | Admin surface | **One MCP server with `tools/list` filtered by token role**, plus REST endpoints |
 
 ## The stage visual
 
@@ -68,9 +69,8 @@ services over private networking). It drives the MCP server through admin endpoi
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /admin/state` | Current flags + resolved tool table, so the panel renders buttons without hardcoding names |
-| `POST /admin/state` | `{"enabled": false}` — the master switch |
-| `POST /admin/services/{name}/state` | `{"enabled": false}` — per-tool; idempotent, safe to mash |
+| `GET /admin/state` | Current on/off state + resolved tool table, so the panel renders buttons without hardcoding names |
+| `POST /admin/control` | `{"target": "global"\|"<tool>", "enabled": false}` — idempotent, safe to mash |
 | `POST /admin/reset` | Everything back to available, between rehearsals |
 | `GET /admin/live` | SSE: in-flight attempt counts **and** toggle-state changes, so every phone stays in sync |
 
@@ -82,14 +82,59 @@ vanishing tool reads as a bug, not a failure.
 Concurrency is last-write-wins in Redis. If the panel is open on 300 phones, gating who may
 press what is the panel's problem, not this server's.
 
+## Roles and tool visibility
+
+One MCP server, one `/mcp` endpoint, bound to both ports. The caller's **role** decides
+which tools `tools/list` returns.
+
+| Role | Condition | Sees |
+|---|---|---|
+| `admin` | valid `ADMIN_TOKEN` **and** request arrived on the internal listener | 4 service tools + admin tools |
+| `agent` | valid agent token | 4 service tools only |
+| — | no/unknown token | `401`, no list at all |
+
+An `ADMIN_TOKEN` presented to the public `8080` listener is **downgraded to `agent`**. The
+"internal network only" constraint is therefore enforced by the network, not merely by a
+header — a leaked admin token is not sufficient to reach the levers from the conference floor.
+
+Agent tokens are configured as `name:token` pairs so logs and the dashboard can say *which*
+caller placed an order ("Melissa's agent ordered a taco").
+
+### Spec tension, and how it is handled
+
+`2026-07-28` explicitly removed per-connection variation of list endpoints: *"List endpoints
+(`tools/list`, `resources/list`, `prompts/list`) no longer vary per-connection."* It also made
+`tools/list` results carry required `ttlMs` and `cacheScope`, where `cacheScope: "public"`
+permits **shared intermediaries to cache the response**.
+
+Filtering by role reintroduces exactly that variation, so:
+
+- `cacheScope` is hardcoded to **`"private"`** on every list result. Never `"public"`.
+  A `"public"` scope on a role-filtered list would let an intermediary serve the admin tool
+  list to Melissa's agent.
+- `ttlMs` stays modest (30s). The list does not vary with toggle state — toggled-off tools
+  remain listed — so a longer TTL buys nothing.
+
+### No availability leakage
+
+A public caller cannot detect toggle state, by construction rather than by redaction:
+
+- Toggled-off tools stay in `tools/list` (decision 6 is *absorb*, not *hide*).
+- A toggled-off tool returns no error — it retries silently, indistinguishable from a slow or
+  dead downstream.
+- No progress notifications are emitted.
+- The 14-minute timeout message is deliberately generic: *"order still in progress, workflow
+  `X`"* — never *"service disabled"*.
+- `/admin/state` and `/admin/live` are internal-listener-only.
+
 ## Two ports, one service
 
 Railway maps one domain to one internal port via target ports ("magic ports"), and a service
 listening on several ports simply gets no domain for the ones you don't map. So:
 
 - **`8080`** — public domain, serves `/mcp` only. Bearer `MCP_AUTH_TOKEN`.
-- **`8081`** — **no domain**, serves `/admin/*` only. Reachable exclusively at
-  `mcp.railway.internal:8081`. Bearer `ADMIN_TOKEN` as defense-in-depth.
+- **`8081`** — **no domain**. Serves `/mcp` (where `admin` role is obtainable) plus
+  `/admin/*` REST. Reachable exclusively at `mcp.railway.internal:8081`.
 
 The admin surface has no route from the internet, so an attendee who reads the MCP URL off
 the projector cannot reach the chaos levers at all.
