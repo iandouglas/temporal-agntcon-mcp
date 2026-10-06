@@ -25,7 +25,8 @@ from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from temporalio.client import Client, WorkflowFailureError
-from temporalio.common import WorkflowIDConflictPolicy
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from durable_mcp.admin import GLOBAL_TARGET, ControlError, apply_control, read_state
 from durable_mcp.config import Config, ServiceConfig
@@ -80,22 +81,43 @@ def _make_service_tool(
         key = _idempotency_key(ctx) or uuid.uuid4().hex[:12]
         workflow_id = f"{service.tool_name}-{key}"
 
-        handle = await get_client().start_workflow(
-            ServiceCallWorkflow.run,
-            ServiceCallInput(
-                tool_name=service.tool_name,
-                url=service.url,
-                caller=caller,
-                start_to_close_seconds=config.activity_start_to_close_seconds,
-                retry_initial_interval_ms=config.retry_initial_interval_ms,
-            ),
-            id=workflow_id,
-            task_queue=config.temporal.task_queue,
-            # A re-issued request with the same key joins the running workflow
-            # rather than ordering a second taco.
-            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
-        )
-        logger.info("%s started workflow %s (caller=%s)", service.tool_name, workflow_id, caller)
+        try:
+            handle = await get_client().start_workflow(
+                ServiceCallWorkflow.run,
+                ServiceCallInput(
+                    tool_name=service.tool_name,
+                    url=service.url,
+                    caller=caller,
+                    start_to_close_seconds=config.activity_start_to_close_seconds,
+                    retry_initial_interval_ms=config.retry_initial_interval_ms,
+                ),
+                id=workflow_id,
+                task_queue=config.temporal.task_queue,
+                # A re-issued request with the same key joins the RUNNING
+                # workflow rather than ordering a second taco.
+                id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                # ...and one whose workflow has already FINISHED is refused
+                # rather than silently starting a second run. The conflict
+                # policy above does not cover that case, and the default reuse
+                # policy (ALLOW_DUPLICATE) is exactly how you order twice:
+                # the agent's keys are replay-stable, so a worker killed after
+                # we completed re-issues the identical key and would have got
+                # a brand new order. FAILED_ONLY still lets a genuinely failed
+                # call be retried.
+                id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+            )
+            logger.info(
+                "%s started workflow %s (caller=%s)", service.tool_name, workflow_id, caller
+            )
+        except WorkflowAlreadyStartedError:
+            # Already completed under this key. Attach to that execution and
+            # return what it returned the first time, which is what makes the
+            # key mean "charged exactly once" rather than "charged again".
+            handle = get_client().get_workflow_handle_for(ServiceCallWorkflow.run, workflow_id)
+            logger.info(
+                "%s reattached to completed workflow %s (caller=%s)",
+                service.tool_name, workflow_id, caller,
+            )
 
         try:
             async with asyncio.timeout(config.tool_call_max_wait_seconds):
