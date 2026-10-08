@@ -22,6 +22,8 @@ from temporalio.worker import Worker
 
 from durable_mcp import dev_service
 from durable_mcp.activities import ServiceActivities
+from durable_mcp.config import Config, ServiceConfig, TemporalConfig
+from durable_mcp.mcp_app import _make_service_tool
 from durable_mcp.shared import ServiceCallInput
 from durable_mcp.state import MemoryStore
 from durable_mcp.workflows import ServiceCallWorkflow
@@ -191,3 +193,107 @@ async def test_same_idempotency_key_joins_the_existing_order(
 
     dev_service._paused.discard("taco")
     assert (await asyncio.wait_for(first.result(), timeout=30)).body == {"taco": True}
+
+
+# --------------------------------------------------------------------------
+# Idempotency across a COMPLETED workflow.
+#
+# `id_conflict_policy=USE_EXISTING` only covers a workflow that is still
+# running. Melissa's agent derives its keys from workflow state alone, so they
+# are byte-identical across a replay: a worker killed after we already finished
+# re-issues the exact same key. With the default reuse policy that started a
+# second run -- a second taco -- while her scoreboard counted it as a duplicate
+# she had prevented.
+# --------------------------------------------------------------------------
+
+
+class _FakeMeta:
+    def __init__(self, key: str) -> None:
+        self.idempotencyKey = key  # noqa: N815 - mirrors the wire field name
+
+
+class _FakeRequestContext:
+    def __init__(self, key: str) -> None:
+        self.meta = _FakeMeta(key)
+
+
+class _FakeContext:
+    """Just enough of an MCP Context for the tool body."""
+
+    def __init__(self, key: str) -> None:
+        self.headers: dict[str, str] = {}
+        self.request_context = _FakeRequestContext(key)
+
+
+_SERVICE = ServiceConfig(
+    index=1,
+    tool_name="order_taco",
+    display_name="Order Taco",
+    description="orders a taco",
+    url=f"{BASE}/taco",
+)
+
+
+def _tool_config() -> Config:
+    return Config(
+        services=(_SERVICE,),
+        temporal=TemporalConfig(
+            address="unused", namespace="default", task_queue=TASK_QUEUE,
+            api_key=None, tls=False,
+        ),
+        redis_url=None,
+        agent_tokens={},
+        admin_token=None,
+        public_port=0,
+        admin_port=0,
+        bind_host="127.0.0.1",
+        activity_start_to_close_seconds=3.0,
+        http_timeout_seconds=2.5,
+        retry_initial_interval_ms=RETRY_MS,
+        tool_call_max_wait_seconds=30.0,
+        keepalive_interval_seconds=5.0,
+        dashboard_poll_seconds=1.0,
+        tools_list_ttl_ms=0,
+        allow_insecure=True,
+    )
+
+
+async def test_the_same_key_never_orders_twice(
+    env: WorkflowEnvironment, worker: Worker
+) -> None:
+    config = _tool_config()
+    tool = _make_service_tool(config, _SERVICE, lambda: env.client)
+
+    first = await tool(_FakeContext("stable-key-1"))
+    assert first["completed"] is True
+
+    # Same key again, long after the first workflow closed: the re-issued call
+    # must attach to that execution and return what it returned, not start a
+    # second one.
+    second = await tool(_FakeContext("stable-key-1"))
+
+    assert second["workflow_id"] == first["workflow_id"]
+    assert second["response"] == first["response"]
+
+    # The real proof: one execution, one run. A second run under the same id
+    # would be a second taco.
+    runs = [
+        execution
+        async for execution in env.client.list_workflows(
+            f"WorkflowId = '{first['workflow_id']}'"
+        )
+    ]
+    assert len(runs) == 1, f"expected one run, found {len(runs)}"
+
+
+async def test_distinct_keys_still_order_separately(
+    env: WorkflowEnvironment, worker: Worker
+) -> None:
+    """The dedup must not be so eager that two real orders collapse into one."""
+    config = _tool_config()
+    tool = _make_service_tool(config, _SERVICE, lambda: env.client)
+
+    first = await tool(_FakeContext("distinct-a"))
+    second = await tool(_FakeContext("distinct-b"))
+
+    assert first["workflow_id"] != second["workflow_id"]
