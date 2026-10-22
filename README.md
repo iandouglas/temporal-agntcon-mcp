@@ -256,3 +256,15 @@ CLI is absent.
 
 `DESIGN.md` records every decision and the reasoning, including the options
 rejected.
+
+## Part of the AgntCon / MCPCon 2026 Demo
+
+This is one piece of a larger demo. Start at
+[temporal-agntcon-devnotes](https://github.com/iandouglas/temporal-agntcon-devnotes)
+for how the pieces fit together, and
+[RAILWAY.md](https://github.com/iandouglas/temporal-agntcon-devnotes/blob/main/RAILWAY.md)
+to deploy them.
+
+## License
+
+[MIT](LICENSE)
